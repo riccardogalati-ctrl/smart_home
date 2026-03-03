@@ -144,26 +144,118 @@ async function autoGenerateSuggestions(){
     const data = await res.json();
     const box = document.getElementById('suggestions');
     if (!box) return;
-    if (data.suggestions && data.suggestions.length){
-      box.innerHTML = '';
-      data.suggestions.forEach(s => {
-        const el = document.createElement('div');
-        el.className = 'p-2 border rounded mb-2';
-        el.textContent = `${s.device} — ${s.action}`;
-        box.appendChild(el);
-      });
+
+    // Se in deficit
+    if (data.inDeficit) {
+      const deficit = Math.abs(data.delta);
+      box.innerHTML = `
+        <div class="bg-red-50 border-l-4 border-red-500 p-3 mb-3">
+          <div class="flex items-center mb-2">
+            <div class="w-2 h-2 bg-red-500 rounded-full animate-pulse mr-2"></div>
+            <div class="font-bold text-red-700">⚠️ DEFICIT ENERGETICO</div>
+          </div>
+          <div class="text-sm text-red-600 mb-2">
+            Stai consumando <strong>${deficit}W</strong> più di quello che produci
+          </div>
+          <div class="text-xs text-red-600">
+            Produzione: <strong>${data.production}W</strong> | Consumo: <strong>${data.consumption}W</strong>
+          </div>
+        </div>
+      `;
+
+      // Mostra suggerimenti di spegnimento
+      if (data.suggestions && data.suggestions.length) {
+        const suggestionsHtml = data.suggestions.map(s => `
+          <div class="bg-yellow-50 border border-yellow-200 p-2 mb-2 rounded">
+            <div class="flex items-center justify-between mb-2">
+              <div>
+                <div class="font-semibold text-yellow-800">🔌 ${s.device}</div>
+                <div class="text-xs text-yellow-700">Consumo: ${s.consumption_w}W</div>
+              </div>
+              <button onclick="applySuggestion(${s.id})" class="bg-yellow-600 hover:bg-yellow-700 text-white px-2 py-1 rounded text-xs font-medium transition">
+                Spegni
+              </button>
+            </div>
+          </div>
+        `).join('');
+        box.innerHTML += suggestionsHtml;
+      } else {
+        box.innerHTML += '<div class="text-xs text-gray-600 mt-2">Nessun dispositivo può essere spento.</div>';
+      }
+    } else if (data.delta > 500) {
+      // Surplus energetico
+      box.innerHTML = `
+        <div class="bg-green-50 border-l-4 border-green-500 p-3 mb-3">
+          <div class="flex items-center mb-2">
+            <div class="w-2 h-2 bg-green-500 rounded-full mr-2"></div>
+            <div class="font-bold text-green-700">✓ SURPLUS ENERGETICO</div>
+          </div>
+          <div class="text-sm text-green-700">
+            Hai un surplus di <strong>${data.delta}W</strong>
+          </div>
+        </div>
+      `;
+
+      if (data.suggestions && data.suggestions.length) {
+        const suggestionsHtml = data.suggestions.map(s => `
+          <div class="bg-blue-50 border border-blue-200 p-2 mb-2 rounded">
+            <div class="flex items-center justify-between mb-2">
+              <div>
+                <div class="font-semibold text-blue-800">💡 ${s.device}</div>
+                <div class="text-xs text-blue-700">Consumo: ${s.consumption_w}W</div>
+              </div>
+              <button onclick="applySuggestion(${s.id})" class="bg-blue-600 hover:bg-blue-700 text-white px-2 py-1 rounded text-xs font-medium transition">
+                Accendi
+              </button>
+            </div>
+          </div>
+        `).join('');
+        box.innerHTML += suggestionsHtml;
+      } else {
+        box.innerHTML += '<div class="text-xs text-gray-600 mt-2">Tutti i dispositivi prioritari sono accesi.</div>';
+      }
     } else {
-      box.textContent = 'Nessun suggerimento.';
+      // Tutto ok
+      box.innerHTML = `
+        <div class="bg-blue-50 border-l-4 border-blue-500 p-3">
+          <div class="flex items-center">
+            <div class="w-2 h-2 bg-blue-500 rounded-full mr-2"></div>
+            <div class="font-semibold text-blue-700">Situazione equilibrata</div>
+          </div>
+          <div class="text-sm text-blue-600 mt-2">
+            Produzione: <strong>${data.production}W</strong> | Consumo: <strong>${data.consumption}W</strong>
+          </div>
+        </div>
+      `;
     }
   }catch(e){ console.error('autoGenerateSuggestions', e); }
 }
+
+// Applica un suggerimento: chiama l'API per eseguirlo
+async function applySuggestion(suggestionId) {
+  try {
+    const res = await fetch(`/suggestions/${suggestionId}/apply`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({})
+    });
+    if (res.ok) {
+      console.log('Suggerimento applicato:', suggestionId);
+      // Aggiorna la visualizzazione
+      await new Promise(r => setTimeout(r, 300));
+      await fetchRealtime();
+      await autoGenerateSuggestions();
+    }
+  } catch(e) {
+    console.error('Errore applicando suggerimento', e);
+  }
+}
+
 // Polling
 fetchRealtime();
 fetchHistory();
 setInterval(fetchRealtime, 5000);
 setInterval(fetchHistory, 10000);
-// auto suggestions every 30s
+// auto suggestions every 10s (più veloce)
 autoGenerateSuggestions();
-setInterval(autoGenerateSuggestions, 30000);
-
-// no manual controls — all automatic
+setInterval(autoGenerateSuggestions, 10000);

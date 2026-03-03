@@ -6,8 +6,8 @@ const path = require('path');
 const DB_PATH = path.join(__dirname, '..', 'dbenergia.db');
 const PORT = process.env.PORT || 3000;
 const OPENWEATHER_API_KEY = process.env.OPENWEATHER_API_KEY || '9bca8d0ea7286bf112e19f75625b0945';
-const LAT = process.env.LAT || '45.46';
-const LON = process.env.LON || '9.19';
+const LAT = process.env.LAT || '45.3593';
+const LON = process.env.LON || '9.6779';
 const IMPIANTO_NOMINALE = Number(process.env.IMPIANTO_NOMINALE) || 3000; // Watt
 
 const app = express();
@@ -292,61 +292,94 @@ app.get('/powerlog/history', async (req,res)=>{
 // Suggestion logic
 app.get('/suggestions/generate', async (req,res)=>{
   try {
-    // previsione produzione semplice
-    const productionPredictedObj = await getRealSolarProduction();
-    const productionPredicted = (productionPredictedObj && typeof productionPredictedObj.production_w === 'number') ? productionPredictedObj.production_w : Number(productionPredictedObj) || 0;
+    // Produzione attuale (non previsione)
+    const productionObj = await getRealSolarProduction();
+    const production = (productionObj && typeof productionObj.production_w === 'number') ? productionObj.production_w : Number(productionObj) || 0;
 
-    // consumo medio prossima ora (stima): media ultimi 12 logs
-    const rows = await all('SELECT consumption_w FROM PowerLogs ORDER BY timestamp DESC LIMIT 12');
-    const avgConsumption = rows.length ? Math.round(rows.reduce((s,r)=> s + r.consumption_w,0) / rows.length) : 800;
-
-    // carichiamo dispositivi ordinati per priorità (1 = alta)
+    // Consumo attuale dei dispositivi
     const devices = await all('SELECT * FROM Devices ORDER BY priority ASC');
+    const devicesWithCurrent = devices.map(d => ({...d, current_w: calcolaConsumoReale(d)}));
+    const currentConsumption = devicesWithCurrent.reduce((s,d)=> s + (Number(d.current_w)||0), 0);
+
+    // Delta attuale - se negativo siamo in deficit
+    const delta = production - currentConsumption;
+    const inDeficit = delta < 0;
+
     const suggestions = [];
 
     // Evita duplicati: helper per verificare se esiste già suggerimento inviato
     async function hasPendingSuggestion(deviceId, action) {
-      const s = await get('SELECT id FROM Suggestions WHERE device_id=? AND action=? AND status=? LIMIT 1', [deviceId, action, 'Inviato']);
+      const s = await get('SELECT id FROM Suggestions WHERE device_id=? AND action=? AND status NOT IN (?,?) LIMIT 1', [deviceId, action, 'Eseguito', 'Rifiutato']);
       return !!s;
     }
 
-    // Valutiamo scenario: se previsione superiore alla media -> proviamo ad accendere
-    if (productionPredicted > avgConsumption) {
-      let availableSurplus = productionPredicted - avgConsumption;
-      for (const d of devices) {
-        const isOn = Number(d.status || 0) === 1;
-        const nominal = Number(d.nominal_consumption || 0);
-        if (isOn) continue; // già acceso
+    if (inDeficit) {
+      // DEFICIT ENERGETICO: suggeriamo di spegnere dispositivi per risparmiare energia
+      let deficitAmount = Math.abs(delta);
+      
+      // Ordina dispositivi accesi per priorità (bassa prima) poi per consumo (alto prima)
+      const onDevices = devicesWithCurrent
+        .filter(d => Number(d.status||0) === 1 && Number(d.is_constant||0) === 0) // solo quelli accesi e non costanti (no frigo)
+        .sort((a,b) => {
+          // Priorità bassa prima (3 prima di 2, 2 prima di 1)
+          const priorityDiff = Number(b.priority||0) - Number(a.priority||0);
+          if (priorityDiff !== 0) return priorityDiff;
+          // Se stessa priorità, consumi alti prima
+          return Number(b.current_w||0) - Number(a.current_w||0);
+        });
 
-        // Priorità 1 devices should be suggested when any surplus or explicitly high priority
-        const recommendBecausePriority = Number(d.priority) === 1;
-        const recommendBecauseFits = availableSurplus >= nominal;
-
-        if ((recommendBecausePriority || recommendBecauseFits) && !(await hasPendingSuggestion(d.id, 'Accendi'))) {
-          const r = await run('INSERT INTO Suggestions (device_id, action, status) VALUES (?,?,?)', [d.id, 'Accendi', 'Inviato']);
-          suggestions.push({id: r.lastID, device: d.name, action: 'Accendi'});
-          // If we used up surplus, decrement
-          if (!recommendBecausePriority) availableSurplus -= nominal;
+      for (const d of onDevices) {
+        const nominal = Number(d.current_w||0);
+        
+        // Suggerisci di spegnere se non c'è già un suggerimento per questo dispositivo
+        if (!(await hasPendingSuggestion(d.id, 'Spegni'))) {
+          const r = await run('INSERT INTO Suggestions (device_id, action, status) VALUES (?,?,?)', [d.id, 'Spegni', 'Inviato']);
+          suggestions.push({
+            id: r.lastID, 
+            device: d.name, 
+            action: 'Spegni',
+            consumption_w: nominal,
+            priority: d.priority
+          });
+          deficitAmount -= nominal;
+          // Se abbiamo ridotto il deficit, basta (max 3 suggerimenti)
+          if (deficitAmount <= 0 || suggestions.length >= 3) break;
         }
       }
-    } else if (productionPredicted < avgConsumption) {
-      // Scarsità: suggeriamo di spegnere dispositivi a bassa priorità (3) o grandi carichi
-      let deficit = avgConsumption - productionPredicted;
-      // consider devices currently ON, order by priority DESC (low priority first) and by nominal desc
-      const onDevices = devices.filter(d => Number(d.status||0) === 1).sort((a,b) => (Number(b.priority||0)-Number(a.priority||0)) || (Number(b.nominal_consumption||0)-Number(a.nominal_consumption||0)));
-      for (const d of onDevices) {
+    } else if (delta > 500) {
+      // SURPLUS ENERGETICO: suggeriamo di accendere dispositivi a priorità alta
+      let availableSurplus = delta;
+      
+      const offDevices = devicesWithCurrent
+        .filter(d => Number(d.status||0) === 0) // spenti
+        .sort((a,b) => Number(a.priority||0) - Number(b.priority||0)); // priorità alta prima
+
+      for (const d of offDevices) {
         const nominal = Number(d.nominal_consumption||0);
-        // prefer to suggest turning off priority 3 devices or very large loads
-        if ((Number(d.priority) === 3 || nominal > 2000) && !(await hasPendingSuggestion(d.id, 'Spegni'))) {
-          const r = await run('INSERT INTO Suggestions (device_id, action, status) VALUES (?,?,?)', [d.id, 'Spegni', 'Inviato']);
-          suggestions.push({id: r.lastID, device: d.name, action: 'Spegni'});
-          deficit -= nominal;
-          if (deficit <= 0) break;
+        
+        // Suggerisci di accendere se ha priorità alta e c'è surplus sufficiente
+        if (Number(d.priority) === 1 && nominal <= availableSurplus && !(await hasPendingSuggestion(d.id, 'Accendi'))) {
+          const r = await run('INSERT INTO Suggestions (device_id, action, status) VALUES (?,?,?)', [d.id, 'Accendi', 'Inviato']);
+          suggestions.push({
+            id: r.lastID, 
+            device: d.name, 
+            action: 'Accendi',
+            consumption_w: nominal,
+            priority: d.priority
+          });
+          availableSurplus -= nominal;
+          if (suggestions.length >= 2) break;
         }
       }
     }
 
-    res.json({productionPredicted, avgConsumption, suggestions});
+    res.json({
+      production,
+      consumption: currentConsumption,
+      delta,
+      inDeficit,
+      suggestions
+    });
   } catch(e){ res.status(500).json({error: e.message}); }
 });
 

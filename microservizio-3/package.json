@@ -1,0 +1,14 @@
+{
+  "name": "suggestion-service",
+  "version": "1.0.0",
+  "description": "Microservice: Suggerimenti e Frontend Dashboard",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "node-fetch": "^2.6.7",
+    "sqlite3": "^5.1.6"
+  }
+}
