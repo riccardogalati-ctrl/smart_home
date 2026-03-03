@@ -1,0 +1,15 @@
+{
+  "name": "casa-smart-backend",
+  "version": "1.0.0",
+  "description": "Backend semplice per smart home: DB, API e suggerimenti energetici",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/app.js",
+    "test:scripts": "node scripts/run_tests.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "node-fetch": "^2.6.7",
+    "sqlite3": "^5.1.6"
+  }
+}
